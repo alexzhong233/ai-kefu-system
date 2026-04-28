@@ -67,7 +67,7 @@ echo.
 echo 后端地址: http://localhost:8080
 echo 前端地址: http://localhost:3000
 echo.
-echo 请确保已配置.env文件中的DeepSeek API Key
+echo 请确保已配置 .env 文件中的 AI_DASHSCOPE_API_KEY
 echo 请确保PostgreSQL + PGVector已启动
 echo.
 pause

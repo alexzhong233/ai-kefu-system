@@ -132,7 +132,7 @@ COMMENT ON COLUMN t_rag_chunk.document_id IS 'Reference to document';
 COMMENT ON COLUMN t_rag_chunk.content IS 'Chunk content text';
 COMMENT ON COLUMN t_rag_chunk.chunk_index IS 'Chunk sequence number';
 COMMENT ON COLUMN t_rag_chunk.metadata IS 'Additional metadata';
-COMMENT ON COLUMN t_rag_chunk.embedding IS 'Vector embedding (text-embedding-v3 uses 1536 dimensions)';
+COMMENT ON COLUMN t_rag_chunk.embedding IS 'Vector embedding (text-embedding-v3, 1024 dimensions)';
 
 COMMENT ON TABLE t_conversation IS 'Conversation table';
 COMMENT ON COLUMN t_conversation.conversation_id IS 'Conversation identifier';

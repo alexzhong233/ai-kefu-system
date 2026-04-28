@@ -78,7 +78,7 @@ echo   数据库: %DB_NAME%
 echo   用户: %DB_USER%
 echo.
 echo 下一步:
-echo 1. 配置 backend\.env 文件中的DeepSeek API Key
+echo 1. 配置 backend\.env 文件中的 AI_DASHSCOPE_API_KEY
 echo 2. 启动后端: cd backend ^&^& mvn spring-boot:run
 echo 3. 启动前端: cd frontend ^&^& npm install ^&^& npm run dev
 echo.
