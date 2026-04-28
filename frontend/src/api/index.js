@@ -30,12 +30,12 @@ export default {
   },
   chat: {
     sendMessage: (params) => apiClient.post('/chat/send', params),
-    streamMessage: (params) => {
-      // 使用相对路径，让 vite proxy 处理
+    streamMessage: (params, signal) => {
       return fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params)
+        body: JSON.stringify(params),
+        signal
       })
     },
     getUsers: () => apiClient.get('/chat/users'),

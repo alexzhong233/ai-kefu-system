@@ -79,10 +79,10 @@
             </div>
             <div class="message-bubble" :class="msg.role">
               <div class="message-role-label" v-if="msg.role === 'system'">系统消息</div>
-              <div class="message-text">
-                {{ msg.content }}
-                <span v-if="msg.role === 'assistant' && msg.messageId?.startsWith('temp-ai-') && store.loading" class="typing-cursor">▎</span>
+              <div v-if="msg.role === 'assistant'" class="message-text markdown-body">
+                <span v-html="renderMarkdown(msg.content || '')"></span><span v-if="msg.messageId?.startsWith('temp-ai-') && store.loading" class="typing-cursor">▎</span>
               </div>
+              <div v-else class="message-text">{{ msg.content }}</div>
               <div class="message-time" v-if="!msg.messageId?.startsWith('temp-')">{{ formatTime(msg.createdAt) }}</div>
             </div>
             <div class="message-avatar user-avatar" v-if="msg.role === 'user'">
@@ -114,16 +114,25 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, watch } from 'vue'
+import { ref, onMounted, nextTick, watch, computed } from 'vue'
 import { useAppStore } from '../store'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import api from '../api'
+import { marked } from 'marked'
+
+// 配置 marked
+marked.setOptions({
+  breaks: true,
+  gfm: true
+})
 
 const store = useAppStore()
 const chatInput = ref('')
 const messagesArea = ref(null)
 const inputRef = ref(null)
 const users = ref([])
+
+// 是否正在流式输出
+const isStreaming = computed(() => store.loading && store.streamingMessage.length > 0)
 
 onMounted(async () => {
   try {
@@ -134,10 +143,9 @@ onMounted(async () => {
   }
 })
 
-watch(() => store.messages.length, async () => {
-  await nextTick()
-  scrollToBottom()
-})
+// 监听消息变化和流式内容变化，自动滚动
+watch(() => store.messages.length, () => scrollToBottom())
+watch(() => store.streamingMessage, () => scrollToBottom())
 
 watch(() => store.currentConversation, () => {
   chatInput.value = ''
@@ -164,7 +172,6 @@ async function sendMessage() {
   chatInput.value = ''
   try {
     await store.sendMessage(msg)
-    scrollToBottom()
   } catch {
     ElMessage.error('发送失败')
   }
@@ -174,11 +181,24 @@ async function sendMessage() {
 async function quickStart(text) {
   await handleCreateConversation()
   chatInput.value = text
+  await nextTick()
+  await sendMessage()
 }
 
 function scrollToBottom() {
-  if (messagesArea.value) {
-    messagesArea.value.scrollTop = messagesArea.value.scrollHeight
+  nextTick(() => {
+    if (messagesArea.value) {
+      messagesArea.value.scrollTop = messagesArea.value.scrollHeight
+    }
+  })
+}
+
+function renderMarkdown(text) {
+  if (!text) return ''
+  try {
+    return marked.parse(text)
+  } catch {
+    return text
   }
 }
 
@@ -529,6 +549,86 @@ function formatTime(dateStr) {
 .message-text {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.message-text.markdown-body {
+  white-space: normal;
+}
+
+.message-text.markdown-body :deep(p) {
+  margin: 0 0 8px;
+}
+
+.message-text.markdown-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.message-text.markdown-body :deep(code) {
+  background: rgba(0,0,0,0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+}
+
+.message-text.markdown-body :deep(pre) {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  padding: 12px 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.message-text.markdown-body :deep(pre code) {
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+.message-text.markdown-body :deep(ul),
+.message-text.markdown-body :deep(ol) {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.message-text.markdown-body :deep(li) {
+  margin: 2px 0;
+}
+
+.message-text.markdown-body :deep(blockquote) {
+  border-left: 3px solid var(--primary-light);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--text-secondary);
+}
+
+.message-text.markdown-body :deep(h1),
+.message-text.markdown-body :deep(h2),
+.message-text.markdown-body :deep(h3) {
+  margin: 12px 0 6px;
+  font-weight: 600;
+}
+
+.message-text.markdown-body :deep(table) {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+
+.message-text.markdown-body :deep(th),
+.message-text.markdown-body :deep(td) {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.message-text.markdown-body :deep(th) {
+  background: var(--bg-input);
+  font-weight: 600;
 }
 
 .typing-cursor {

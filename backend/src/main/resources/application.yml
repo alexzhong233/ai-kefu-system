@@ -1,5 +1,8 @@
 server:
   port: ${SERVER_PORT:8080}
+  # 禁用响应压缩，防止 SSE 被缓冲
+  compression:
+    enabled: false
 
 spring:
   application:

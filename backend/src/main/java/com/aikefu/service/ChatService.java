@@ -4,6 +4,8 @@ import com.aikefu.dto.ChatRequest;
 import com.aikefu.dto.QueryRequest;
 import com.aikefu.entity.*;
 import com.aikefu.mapper.*;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -13,13 +15,13 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.publisher.Flux;
 
-import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 @Service
@@ -30,15 +32,28 @@ public class ChatService {
     private final UserMapper userMapper;
     private final ConversationMapper conversationMapper;
     private final ConversationMessageMapper messageMapper;
-    private final MemoryCompressionMapper compressionMapper;
     private final RagService ragService;
+    private final ObjectMapper objectMapper;
     
     private static final int MAX_HISTORY_MESSAGES = 20;
-    private static final int COMPRESSION_THRESHOLD = 30;
     private static final String SYSTEM_PROMPT = """
         You are a helpful AI customer service assistant. 
         Use the provided context to answer user questions accurately.
         If you don't know something, say so honestly.
+        """;
+
+    private static final int SUMMARY_ROUND_INTERVAL = 10;
+
+    private static final String SUMMARY_PROMPT = """
+        请总结以下对话内容。要求：
+        1. 生成一个简短的标题（不超过30个字符），概括对话主题
+        2. 生成一段摘要（不超过200字），包含对话的关键信息、用户需求和已给出的回答要点
+        
+        对话内容：
+        %s
+        
+        请严格按照以下JSON格式返回，不要包含markdown标记或其他内容：
+        {"title":"简短标题","summary":"详细摘要"}
         """;
     
     public Map<String, Object> chat(ChatRequest request) {
@@ -70,14 +85,10 @@ public class ChatService {
         String context = buildContext(ragResults);
         
         List<ConversationMessage> history = messageMapper.getMessagesByConversationId(conversationId);
-        
-        if (history.size() >= COMPRESSION_THRESHOLD) {
-            compressMemory(conversationId, history);
-        }
-        
-        history = messageMapper.getMessagesByConversationId(conversationId);
-        
-        List<Message> messages = buildMessages(context, history, message);
+
+        String conversationSummary = conversation.getSummary();
+        Integer lastSummarizedMessageCount = conversation.getLastSummarizedMessageCount();
+        List<Message> messages = buildMessages(context, conversationSummary, lastSummarizedMessageCount, history, message);
 
         // 先保存用户消息
         saveMessage(conversationId, "user", message);
@@ -94,6 +105,12 @@ public class ChatService {
         ConversationMessage assistantMessage = saveMessage(conversationId, "assistant", assistantResponse);
         
         updateConversationMessageCount(conversationId);
+
+        // 记忆总结：第一轮和以后每10轮
+        int round = getConversationRound(conversationId);
+        if (round == 1 || (round > 1 && round % SUMMARY_ROUND_INTERVAL == 0)) {
+            summarizeConversation(conversationId);
+        }
         
         Map<String, Object> response = new HashMap<>();
         response.put("messageId", assistantMessage.getMessageId());
@@ -105,7 +122,11 @@ public class ChatService {
         return response;
     }
 
-    public void chatStream(ChatRequest request, SseEmitter emitter) {
+    /**
+     * 流式聊天 — 返回 Flux<ServerSentEvent>
+     * Spring MVC 自动管理 SSE 流的 flush，每个元素立即推送到客户端
+     */
+    public Flux<ServerSentEvent<String>> chatStreamFlux(ChatRequest request) {
         String userId = request.getUserId();
         String convId = request.getConversationId();
         String message = request.getMessage();
@@ -116,28 +137,26 @@ public class ChatService {
 
         getOrCreateUser(userId);
 
-        if (convId == null || convId.isEmpty()) {
+        boolean isNewConversation = (convId == null || convId.isEmpty());
+        if (isNewConversation) {
             convId = createConversation(userId);
         }
 
         Conversation conversation = getConversation(convId);
         if (conversation == null) {
             convId = createConversation(userId);
+            isNewConversation = true;
         }
 
         final String conversationId = convId;
+        final boolean newConversation = isNewConversation;
+        final String conversationSummary = conversation.getSummary();
+        final Integer lastSummarizedMessageCount = conversation.getLastSummarizedMessageCount();
 
         // 先保存用户消息
         saveMessage(conversationId, "user", message);
 
-        // 发送 conversationId 给前端
-        try {
-            emitter.send(SseEmitter.event().name("meta").data(Map.of("conversationId", conversationId)));
-        } catch (IOException e) {
-            log.error("Error sending meta event", e);
-            return;
-        }
-
+        // RAG 检索
         QueryRequest queryRequest = new QueryRequest();
         queryRequest.setQuery(message);
         queryRequest.setTopK(5);
@@ -147,72 +166,82 @@ public class ChatService {
 
         List<ConversationMessage> history = messageMapper.getMessagesByConversationId(conversationId);
 
-        if (history.size() >= COMPRESSION_THRESHOLD) {
-            compressMemory(conversationId, history);
-        }
+        List<Message> messages = buildMessages(context, conversationSummary, lastSummarizedMessageCount, history, message);
 
-        history = messageMapper.getMessagesByConversationId(conversationId);
+        // 累积完整响应
+        AtomicReference<StringBuilder> fullResponseRef = new AtomicReference<>(new StringBuilder());
 
-        List<Message> messages = buildMessages(context, history, message);
+        // 构建事件流：meta → tokens → done
+        Flux<ServerSentEvent<String>> metaFlux = Flux.just(
+            ServerSentEvent.<String>builder()
+                .event("meta")
+                .data(toJson(Map.of("conversationId", conversationId, "isNew", newConversation)))
+                .build()
+        );
 
-        StringBuilder fullResponse = new StringBuilder();
-        // 使用原子标志防止重复完成
-        final boolean[] isCompleted = {false};
+        Flux<ServerSentEvent<String>> tokenFlux = chatModel.stream(new Prompt(messages))
+            .flatMap(chatResponse -> {
+                String token = chatResponse.getResult().getOutput().getText();
+                if (token != null && !token.isEmpty()) {
+                    fullResponseRef.get().append(token);
+                    return Flux.just(ServerSentEvent.<String>builder()
+                        .event("token")
+                        .data(token)
+                        .build());
+                }
+                return Flux.empty();
+            });
+
+        Flux<ServerSentEvent<String>> doneFlux = Flux.defer(() -> {
+            String responseText = fullResponseRef.get().toString();
+            if (responseText.isEmpty()) {
+                responseText = "（AI 未返回内容）";
+            }
+            ConversationMessage assistantMessage = saveMessage(conversationId, "assistant", responseText);
+            updateConversationMessageCount(conversationId);
+
+            // 记忆总结：第一轮和以后每10轮
+            int round = getConversationRound(conversationId);
+            if (round == 1 || (round > 1 && round % SUMMARY_ROUND_INTERVAL == 0)) {
+                summarizeConversation(conversationId);
+            }
+
+            return Flux.just(
+                ServerSentEvent.<String>builder()
+                    .event("done")
+                    .data(toJson(Map.of(
+                        "messageId", assistantMessage.getMessageId(),
+                        "conversationId", conversationId,
+                        "content", responseText
+                    )))
+                    .build()
+            );
+        });
+
+        return Flux.concat(metaFlux, tokenFlux, doneFlux)
+            .onErrorResume(e -> {
+                log.error("Error in stream", e);
+                String errorMsg = "抱歉，AI服务暂时不可用。错误: " + e.getMessage();
+                String currentText = fullResponseRef.get().toString();
+                if (currentText.isEmpty()) {
+                    saveMessage(conversationId, "assistant", errorMsg);
+                    updateConversationMessageCount(conversationId);
+                }
+                return Flux.just(
+                    ServerSentEvent.<String>builder()
+                        .event("error")
+                        .data(errorMsg)
+                        .build()
+                );
+            });
+    }
+
+    private String toJson(Object obj) {
         try {
-            chatModel.stream(new Prompt(messages))
-                .doOnNext(chatResponse -> {
-                    if (isCompleted[0]) return;
-                    try {
-                        String token = chatResponse.getResult().getOutput().getText();
-                        if (token != null && !token.isEmpty()) {
-                            fullResponse.append(token);
-                            emitter.send(SseEmitter.event().name("token").data(token));
-                        }
-                    } catch (IOException e) {
-                        log.error("Error sending token event", e);
-                        isCompleted[0] = true;
-                        emitter.completeWithError(e);
-                    }
-                })
-                .doOnComplete(() -> {
-                    if (isCompleted[0]) return;
-                    isCompleted[0] = true;
-                    ConversationMessage assistantMessage = saveMessage(conversationId, "assistant", fullResponse.toString());
-                    updateConversationMessageCount(conversationId);
-                    try {
-                        emitter.send(SseEmitter.event().name("done").data(Map.of(
-                            "messageId", assistantMessage.getMessageId(),
-                            "conversationId", conversationId
-                        )));
-                        emitter.complete();
-                    } catch (IOException e) {
-                        log.error("Error sending done event", e);
-                        emitter.completeWithError(e);
-                    }
-                })
-                .doOnError(e -> {
-                    if (isCompleted[0]) return;
-                    isCompleted[0] = true;
-                    log.error("Error in stream", e);
-                    String errorMsg = "抱歉，AI服务暂时不可用。错误: " + e.getMessage();
-                    ConversationMessage assistantMessage = saveMessage(conversationId, "assistant", errorMsg);
-                    updateConversationMessageCount(conversationId);
-                    try {
-                        emitter.send(SseEmitter.event().name("error").data(errorMsg));
-                        emitter.complete();
-                    } catch (IOException ex) {
-                        log.error("Error sending error event", ex);
-                        emitter.completeWithError(ex);
-                    }
-                })
-                .subscribe();
-        } catch (Exception e) {
-            log.error("Error calling stream API", e);
-            String errorMsg = "抱歉，AI服务暂时不可用。错误: " + e.getMessage();
-            saveMessage(conversationId, "assistant", errorMsg);
-            try {
-                emitter.send(SseEmitter.event().name("error").data(errorMsg));
-            } catch (IOException ignored) {}
+            return objectMapper.writeValueAsString(obj);
+        } catch (JsonProcessingException e) {
+            log.error("Error serializing to JSON", e);
+            return "{}";
         }
     }
     
@@ -300,22 +329,41 @@ public class ChatService {
         return contextBuilder.toString();
     }
     
-    private List<Message> buildMessages(String context, List<ConversationMessage> history, String currentMessage) {
+    private List<Message> buildMessages(String ragContext, String conversationSummary, Integer lastSummarizedMessageCount, List<ConversationMessage> history, String currentMessage) {
         List<Message> messages = new ArrayList<>();
         
         messages.add(new SystemMessage(SYSTEM_PROMPT));
         
-        if (context != null && !context.isEmpty()) {
-            messages.add(new SystemMessage(context));
+        // 注入对话历史摘要，替代已被总结的旧消息
+        if (conversationSummary != null && !conversationSummary.isEmpty()) {
+            messages.add(new SystemMessage("对话历史摘要: " + conversationSummary));
         }
         
-        List<ConversationMessage> recentHistory = history.size() > MAX_HISTORY_MESSAGES
-            ? history.subList(history.size() - MAX_HISTORY_MESSAGES, history.size())
-            : history;
+        if (ragContext != null && !ragContext.isEmpty()) {
+            messages.add(new SystemMessage(ragContext));
+        }
+        
+        // 只保留 user + assistant 消息，与 lastSummarizedMessageCount 的统计口径一致
+        List<ConversationMessage> effectiveHistory = history.stream()
+            .filter(msg -> "user".equals(msg.getRole()) || "assistant".equals(msg.getRole()))
+            .toList();
+        
+        // 有摘要时，只取未被总结的新消息；无摘要时取全部
+        List<ConversationMessage> recentHistory;
+        if (conversationSummary != null && !conversationSummary.isEmpty() 
+                && lastSummarizedMessageCount != null && lastSummarizedMessageCount > 0) {
+            // 跳过已被总结的消息（全部是 user+assistant，索引一一对应）
+            int skipCount = Math.min(lastSummarizedMessageCount, effectiveHistory.size());
+            recentHistory = effectiveHistory.subList(skipCount, effectiveHistory.size());
+        } else {
+            // 无摘要，取最近的消息
+            recentHistory = effectiveHistory.size() > MAX_HISTORY_MESSAGES
+                ? effectiveHistory.subList(effectiveHistory.size() - MAX_HISTORY_MESSAGES, effectiveHistory.size())
+                : effectiveHistory;
+        }
         
         for (ConversationMessage msg : recentHistory) {
             switch (msg.getRole()) {
-                case "system" -> messages.add(new SystemMessage(msg.getContent()));
                 case "user" -> messages.add(new UserMessage(msg.getContent()));
                 case "assistant" -> messages.add(new AssistantMessage(msg.getContent()));
             }
@@ -326,56 +374,78 @@ public class ChatService {
         return messages;
     }
     
-    private void compressMemory(String conversationId, List<ConversationMessage> history) {
-        log.info("Compressing memory for conversation: {}", conversationId);
-        
-        String compressionId = UUID.randomUUID().toString();
-        
-        int originalCount = history.size();
-        
-        List<ConversationMessage> firstHalf = history.subList(0, history.size() / 2);
-        List<ConversationMessage> secondHalf = history.subList(history.size() / 2, history.size());
-        
-        StringBuilder summaryBuilder = new StringBuilder();
-        summaryBuilder.append("Conversation summary (first ").append(firstHalf.size()).append(" messages):\n");
-        
-        for (ConversationMessage msg : firstHalf) {
-            if ("user".equals(msg.getRole())) {
-                String content = msg.getContent();
-                summaryBuilder.append("User: ").append(content.substring(0, Math.min(100, content.length()))).append("\n");
-            }
-        }
-        
-        String summary = summaryBuilder.toString();
-        
-        for (ConversationMessage msg : firstHalf) {
-            msg.setDeleted(1);
-            messageMapper.updateById(msg);
-        }
-        
-        ConversationMessage summaryMessage = new ConversationMessage();
-        summaryMessage.setMessageId(UUID.randomUUID().toString());
-        summaryMessage.setConversationId(conversationId);
-        summaryMessage.setRole("system");
-        summaryMessage.setContent(summary);
-        summaryMessage.setMetadata(Map.of("type", "memory_compression"));
-        messageMapper.insert(summaryMessage);
-        
-        MemoryCompression compression = new MemoryCompression();
-        compression.setCompressionId(compressionId);
-        compression.setConversationId(conversationId);
-        compression.setOriginalMessageCount(originalCount);
-        compression.setCompressedMessageCount(secondHalf.size() + 1);
-        compression.setSummary(summary);
-        compressionMapper.insert(compression);
-        
-        log.info("Memory compressed: {} -> {} messages", originalCount, secondHalf.size() + 1);
-    }
-    
     public List<User> getAllUsers() {
         return userMapper.selectList(null);
     }
     
+    /**
+     * 获取对话当前轮次（用户消息数量）
+     */
+    private int getConversationRound(String conversationId) {
+        Long userMessageCount = messageMapper.selectCount(
+            new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<ConversationMessage>()
+                .eq("conversation_id", conversationId)
+                .eq("role", "user")
+        );
+        return userMessageCount.intValue();
+    }
+
+    /**
+     * AI 记忆总结：生成对话摘要并更新标题
+     * 在第一轮和以后每10轮自动触发
+     */
+    private void summarizeConversation(String conversationId) {
+        try {
+            Conversation conversation = getConversation(conversationId);
+            if (conversation == null) return;
+
+            List<ConversationMessage> messages = messageMapper.getMessagesByConversationId(conversationId);
+
+            // 只统计 user + assistant 消息数，与 buildMessages 中的实际使用量一致
+            long effectiveMessageCount = messages.stream()
+                .filter(msg -> !"system".equals(msg.getRole()))
+                .count();
+
+            StringBuilder conversationText = new StringBuilder();
+            for (ConversationMessage msg : messages) {
+                if ("system".equals(msg.getRole())) continue;
+                String content = msg.getContent();
+                if (content.length() > 500) {
+                    content = content.substring(0, 500) + "...";
+                }
+                String roleLabel = "user".equals(msg.getRole()) ? "用户" : "助手";
+                conversationText.append(roleLabel).append(": ").append(content).append("\n\n");
+            }
+
+            String prompt = String.format(SUMMARY_PROMPT, conversationText.toString());
+
+            ChatResponse response = chatModel.call(new Prompt(List.of(new UserMessage(prompt))));
+            String result = response.getResult().getOutput().getText();
+
+            // 清理 markdown 代码块标记
+            String cleaned = result.replaceAll("```json\\s*", "").replaceAll("```\\s*", "").trim();
+
+            @SuppressWarnings("unchecked")
+            Map<String, String> parsed = objectMapper.readValue(cleaned, Map.class);
+
+            String title = parsed.getOrDefault("title", conversation.getTitle());
+            String summary = parsed.getOrDefault("summary", "");
+
+            conversationMapper.update(null,
+                new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<Conversation>()
+                    .eq("conversation_id", conversationId)
+                    .set("title", title)
+                    .set("summary", summary)
+                    .set("last_summarized_message_count", effectiveMessageCount)
+                    .set("updated_at", LocalDateTime.now())
+            );
+
+            log.info("Conversation {} summarized: title={}", conversationId, title);
+        } catch (Exception e) {
+            log.warn("Failed to summarize conversation {}: {}", conversationId, e.getMessage());
+        }
+    }
+
     public boolean deleteConversation(String conversationId) {
         Conversation conversation = getConversation(conversationId);
         if (conversation != null) {

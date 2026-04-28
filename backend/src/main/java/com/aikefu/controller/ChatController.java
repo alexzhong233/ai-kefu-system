@@ -6,23 +6,23 @@ import com.aikefu.entity.ConversationMessage;
 import com.aikefu.entity.User;
 import com.aikefu.service.ChatService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/chat")
 @RequiredArgsConstructor
 public class ChatController {
     
     private final ChatService chatService;
-    private final ExecutorService executor = Executors.newCachedThreadPool();
     
     @PostMapping("/send")
     public ResponseEntity<?> sendMessage(@RequestBody ChatRequest request) {
@@ -34,20 +34,13 @@ public class ChatController {
         }
     }
 
+    /**
+     * 流式聊天 — 直接返回 Flux<ServerSentEvent>
+     * Spring MVC 会自动管理 SSE 流的 flush，不需要手动 SseEmitter
+     */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter streamMessage(@RequestBody ChatRequest request) {
-        SseEmitter emitter = new SseEmitter(120000L);
-
-        executor.execute(() -> {
-            try {
-                chatService.chatStream(request, emitter);
-                emitter.complete();
-            } catch (Exception e) {
-                emitter.completeWithError(e);
-            }
-        });
-
-        return emitter;
+    public Flux<ServerSentEvent<String>> streamMessage(@RequestBody ChatRequest request) {
+        return chatService.chatStreamFlux(request);
     }
     
     @GetMapping("/users")

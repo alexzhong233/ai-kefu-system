@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS t_conversation (
     title VARCHAR(500),
     status VARCHAR(20) DEFAULT 'active',
     message_count INTEGER DEFAULT 0,
+    summary TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted INTEGER DEFAULT 0,
@@ -98,6 +99,10 @@ CREATE INDEX IF NOT EXISTS idx_conversation_conv_id ON t_conversation(conversati
 CREATE INDEX IF NOT EXISTS idx_conversation_user_id ON t_conversation(user_id);
 CREATE INDEX IF NOT EXISTS idx_message_conv_id ON t_conversation_message(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_message_created_at ON t_conversation_message(created_at);
+
+-- 为已有数据库添加 summary 列（新建表已包含，此语句兼容旧库）
+ALTER TABLE t_conversation ADD COLUMN IF NOT EXISTS summary TEXT;
+ALTER TABLE t_conversation ADD COLUMN IF NOT EXISTS last_summarized_message_count INTEGER DEFAULT 0;
 
 -- Insert sample users
 INSERT INTO t_user (user_id, user_name, description) VALUES 

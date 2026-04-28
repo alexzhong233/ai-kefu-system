@@ -15,6 +15,8 @@ public class Conversation {
     private String title;
     private String status;
     private Integer messageCount;
+    private String summary;
+    private Integer lastSummarizedMessageCount;
     
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
