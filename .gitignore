@@ -1,0 +1,57 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+
+# Backend
+backend/target/
+backend/*.log
+backend/uploads/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.DS_Store
+
+# Environment
+.env
+*.env.local
+*.env.production
+
+# Build
+*.class
+*.jar
+*.war
+*.ear
+
+# Logs
+*.log
+logs/
+
+# Temp files
+*.tmp
+*.bak
+*.swp
+
+# Database
+*.db
+*.sqlite
+
+# Maven
+.mvn/wrapper/maven-wrapper.jar
+
+# Gradle
+.gradle/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
