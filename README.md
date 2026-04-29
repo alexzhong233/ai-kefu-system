@@ -5,6 +5,7 @@
 ## 功能特性
 
 ### RAG 知识库管理
+
 - 文档上传（支持 .txt, .md, .html, .pdf, .doc, .docx 等格式）
 - 智能分块（按段落/标题/句子分割，支持中英文断句，chunk 间保留重叠）
 - 向量化存储（DashScope text-embedding-v3，1024 维）
@@ -12,6 +13,7 @@
 - 文档管理和统计
 
 ### 智能对话
+
 - 多用户 / 多会话隔离
 - SSE 流式响应（token 级实时推送）
 - RAG 增强回答（自动检索知识库注入上下文）
@@ -20,17 +22,18 @@
 
 ## 技术栈
 
-| 层级 | 技术 | 版本 |
-|------|------|------|
-| 后端框架 | Spring Boot | 3.4.5 |
-| AI 集成 | Spring AI + Spring AI Alibaba (DashScope) | 1.0.0 / 1.0.0.2 |
-| ORM | MyBatis-Plus | 3.5.5 |
-| 数据库 | PostgreSQL + PGVector | 15+ |
-| 文件解析 | Apache Tika | 2.9.2 |
-| 前端框架 | Vue 3 | 3.4.0 |
-| UI 组件 | Element Plus | 2.4.4 |
-| 状态管理 | Pinia | 2.1.7 |
-| 构建工具 | Vite | 5.0.0 |
+
+| 层级     | 技术                                      | 版本            |
+| -------- | ----------------------------------------- | --------------- |
+| 后端框架 | Spring Boot                               | 3.4.5           |
+| AI 集成  | Spring AI + Spring AI Alibaba (DashScope) | 1.0.0 / 1.0.0.2 |
+| ORM      | MyBatis-Plus                              | 3.5.5           |
+| 数据库   | PostgreSQL + PGVector                     | 15+             |
+| 文件解析 | Apache Tika                               | 2.9.2           |
+| 前端框架 | Vue 3                                     | 3.4.0           |
+| UI 组件  | Element Plus                              | 2.4.4           |
+| 状态管理 | Pinia                                     | 2.1.7           |
+| 构建工具 | Vite                                      | 5.0.0           |
 
 ## 项目结构
 
@@ -81,38 +84,43 @@ ai-kefu-system/
 
 ## 数据库表结构
 
-| 表名 | 说明 | 关键字段 |
-|------|------|----------|
-| `t_user` | 用户表 | user_id, user_name |
-| `t_rag_document` | RAG 文档表 | document_id, file_name, file_path, status |
-| `t_rag_chunk` | 文档分块表 | chunk_id, document_id, content, embedding(1024维) |
-| `t_conversation` | 对话表 | conversation_id, user_id, title, summary |
-| `t_conversation_message` | 消息表 | message_id, conversation_id, role, content |
-| `t_memory_compression` | 记忆压缩历史表 | compression_id, conversation_id, summary |
+
+| 表名                     | 说明           | 关键字段                                          |
+| ------------------------ | -------------- | ------------------------------------------------- |
+| `t_user`                 | 用户表         | user_id, user_name                                |
+| `t_rag_document`         | RAG 文档表     | document_id, file_name, file_path, status         |
+| `t_rag_chunk`            | 文档分块表     | chunk_id, document_id, content, embedding(1024维) |
+| `t_conversation`         | 对话表         | conversation_id, user_id, title, summary          |
+| `t_conversation_message` | 消息表         | message_id, conversation_id, role, content        |
+| `t_memory_compression`   | 记忆压缩历史表 | compression_id, conversation_id, summary          |
 
 ## API 接口
 
 ### RAG 管理
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/rag/upload` | 上传文档（multipart） |
-| POST | `/api/rag/query` | 相似度查询 |
-| GET | `/api/rag/documents` | 文档列表 |
-| GET | `/api/rag/documents/{id}` | 文档详情 |
-| GET | `/api/rag/documents/{id}/chunks` | 文档分块 |
-| DELETE | `/api/rag/documents/{id}` | 删除文档（逻辑删除） |
-| GET | `/api/rag/statistics` | 统计信息 |
+
+
+| 方法   | 路径                             | 说明                  |
+| ------ | -------------------------------- | --------------------- |
+| POST   | `/api/rag/upload`                | 上传文档（multipart） |
+| POST   | `/api/rag/query`                 | 相似度查询            |
+| GET    | `/api/rag/documents`             | 文档列表              |
+| GET    | `/api/rag/documents/{id}`        | 文档详情              |
+| GET    | `/api/rag/documents/{id}/chunks` | 文档分块              |
+| DELETE | `/api/rag/documents/{id}`        | 删除文档（逻辑删除）  |
+| GET    | `/api/rag/statistics`            | 统计信息              |
 
 ### 对话管理
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/chat/send` | 发送消息（非流式） |
-| POST | `/api/chat/stream` | 发送消息（SSE 流式） |
-| GET | `/api/chat/users` | 用户列表 |
-| POST | `/api/chat/conversations` | 创建对话 |
-| GET | `/api/chat/conversations?userId=xxx` | 对话列表 |
-| GET | `/api/chat/conversations/{id}/messages` | 消息列表 |
-| DELETE | `/api/chat/conversations/{id}` | 删除对话（逻辑删除） |
+
+
+| 方法   | 路径                                    | 说明                 |
+| ------ | --------------------------------------- | -------------------- |
+| POST   | `/api/chat/send`                        | 发送消息（非流式）   |
+| POST   | `/api/chat/stream`                      | 发送消息（SSE 流式） |
+| GET    | `/api/chat/users`                       | 用户列表             |
+| POST   | `/api/chat/conversations`               | 创建对话             |
+| GET    | `/api/chat/conversations?userId=xxx`    | 对话列表             |
+| GET    | `/api/chat/conversations/{id}/messages` | 消息列表             |
+| DELETE | `/api/chat/conversations/{id}`          | 删除对话（逻辑删除） |
 
 ## 环境要求
 

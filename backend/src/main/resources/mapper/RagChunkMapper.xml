@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.aikefu.mapper.RagChunkMapper">
+
+    <select id="searchByVector" resultType="com.aikefu.entity.RagChunk">
+        SELECT * FROM t_rag_chunk
+        WHERE deleted = 0
+        ORDER BY embedding &lt;=&gt; #{embedding}::vector
+        LIMIT #{topK}
+    </select>
+
+    <select id="searchByVectorWithThreshold" resultType="java.util.HashMap">
+        SELECT chunk_id, document_id, parent_chunk_id, content, chunk_index, metadata,
+               1 - (embedding &lt;=&gt; #{embedding}::vector) AS similarity
+        FROM t_rag_chunk
+        WHERE deleted = 0
+          AND 1 - (embedding &lt;=&gt; #{embedding}::vector) >= #{threshold}
+        ORDER BY embedding &lt;=&gt; #{embedding}::vector
+        LIMIT #{topK}
+    </select>
+
+    <select id="findByChunkId" resultType="java.util.HashMap">
+        SELECT chunk_id, document_id, content, chunk_index, metadata
+        FROM t_rag_chunk
+        WHERE chunk_id = #{chunkId} AND deleted = 0
+    </select>
+
+</mapper>

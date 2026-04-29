@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS t_rag_chunk (
     id BIGSERIAL PRIMARY KEY,
     chunk_id VARCHAR(100) NOT NULL UNIQUE,
     document_id VARCHAR(100) NOT NULL,
+    parent_chunk_id VARCHAR(100),          -- 父级 chunk ID，用于 Parent-Child 分块策略
     content TEXT NOT NULL,
     chunk_index INTEGER,
     metadata JSONB,
@@ -95,6 +96,7 @@ CREATE TABLE IF NOT EXISTS t_memory_compression (
 CREATE INDEX IF NOT EXISTS idx_user_user_id ON t_user(user_id);
 CREATE INDEX IF NOT EXISTS idx_rag_document_doc_id ON t_rag_document(document_id);
 CREATE INDEX IF NOT EXISTS idx_rag_chunk_doc_id ON t_rag_chunk(document_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunk_parent_id ON t_rag_chunk(parent_chunk_id) WHERE parent_chunk_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_conversation_conv_id ON t_conversation(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conversation_user_id ON t_conversation(user_id);
 CREATE INDEX IF NOT EXISTS idx_message_conv_id ON t_conversation_message(conversation_id);
@@ -103,6 +105,9 @@ CREATE INDEX IF NOT EXISTS idx_message_created_at ON t_conversation_message(crea
 -- 为已有数据库添加 summary 列（新建表已包含，此语句兼容旧库）
 ALTER TABLE t_conversation ADD COLUMN IF NOT EXISTS summary TEXT;
 ALTER TABLE t_conversation ADD COLUMN IF NOT EXISTS last_summarized_message_count INTEGER DEFAULT 0;
+
+-- 为已有数据库添加 parent_chunk_id 列（Parent-Child 分块策略）
+ALTER TABLE t_rag_chunk ADD COLUMN IF NOT EXISTS parent_chunk_id VARCHAR(100);
 
 -- Insert sample users
 INSERT INTO t_user (user_id, user_name, description) VALUES 

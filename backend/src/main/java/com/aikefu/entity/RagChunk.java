@@ -13,6 +13,7 @@ public class RagChunk {
     
     private String chunkId;
     private String documentId;
+    private String parentChunkId;
     private String content;
     private Integer chunkIndex;
     
