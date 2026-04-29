@@ -795,12 +795,12 @@ public class RagService {
     }
     
     /**
-     * 批量生成 embedding（DashScope 一次最多 25 条）
+     * 批量生成 embedding（DashScope 一次最多 10 条）
      */
     private List<float[]> batchGenerateEmbeddings(List<String> texts) {
         try {
             List<float[]> allEmbeddings = new ArrayList<>();
-            int batchSize = 25;
+            int batchSize = 10;  // DashScope API 限制：单次最多 10 个文本
             
             for (int i = 0; i < texts.size(); i += batchSize) {
                 List<String> batch = texts.subList(i, Math.min(i + batchSize, texts.size()));
