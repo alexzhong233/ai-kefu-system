@@ -22,6 +22,8 @@ public class RagChunk {
     
     @TableField(typeHandler = com.aikefu.util.VectorTypeHandler.class)
     private float[] embedding;
+
+    private String embeddingProviderId;
     
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;

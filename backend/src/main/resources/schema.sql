@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS t_rag_chunk (
     chunk_index INTEGER,
     metadata JSONB,
     embedding VECTOR(1024),
+    embedding_provider_id VARCHAR(100),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     deleted INTEGER DEFAULT 0,
@@ -79,6 +80,27 @@ CREATE TABLE IF NOT EXISTS t_conversation_message (
     FOREIGN KEY (conversation_id) REFERENCES t_conversation(conversation_id) ON DELETE CASCADE
 );
 
+-- AI Provider configuration table (list mode, multiple configs per type)
+CREATE TABLE IF NOT EXISTS t_ai_provider (
+    id BIGSERIAL PRIMARY KEY,
+    provider_id VARCHAR(100) NOT NULL UNIQUE,
+    name VARCHAR(200) NOT NULL,
+    provider_type VARCHAR(50) NOT NULL,     -- dashscope / openai
+    model_type VARCHAR(50) NOT NULL,        -- chat / embedding / rerank
+    api_key VARCHAR(500) NOT NULL,
+    base_url VARCHAR(500),
+    model_name VARCHAR(200) NOT NULL,
+    extra_config JSONB,
+    is_active BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted INTEGER DEFAULT 0
+);
+
+-- Partial unique index: only one active config per model_type
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_active
+    ON t_ai_provider(model_type) WHERE is_active = TRUE AND deleted = 0;
+
 -- Memory compression history table
 CREATE TABLE IF NOT EXISTS t_memory_compression (
     id BIGSERIAL PRIMARY KEY,
@@ -108,6 +130,10 @@ ALTER TABLE t_conversation ADD COLUMN IF NOT EXISTS last_summarized_message_coun
 
 -- 为已有数据库添加 parent_chunk_id 列（Parent-Child 分块策略）
 ALTER TABLE t_rag_chunk ADD COLUMN IF NOT EXISTS parent_chunk_id VARCHAR(100);
+
+-- 为已有数据库添加 embedding_provider_id 列（关联 embedding 模型配置）
+ALTER TABLE t_rag_chunk ADD COLUMN IF NOT EXISTS embedding_provider_id VARCHAR(100);
+CREATE INDEX IF NOT EXISTS idx_rag_chunk_embedding_provider ON t_rag_chunk(embedding_provider_id);
 
 -- Insert sample users
 INSERT INTO t_user (user_id, user_name, description) VALUES 
@@ -159,3 +185,16 @@ COMMENT ON COLUMN t_memory_compression.conversation_id IS 'Conversation identifi
 COMMENT ON COLUMN t_memory_compression.original_message_count IS 'Original message count';
 COMMENT ON COLUMN t_memory_compression.compressed_message_count IS 'Compressed message count';
 COMMENT ON COLUMN t_memory_compression.summary IS 'Compression summary';
+
+COMMENT ON TABLE t_ai_provider IS 'AI Provider configuration table';
+COMMENT ON COLUMN t_ai_provider.provider_id IS 'Provider identifier';
+COMMENT ON COLUMN t_ai_provider.name IS 'User-defined config name';
+COMMENT ON COLUMN t_ai_provider.provider_type IS 'Provider type: dashscope, openai';
+COMMENT ON COLUMN t_ai_provider.model_type IS 'Model type: chat, embedding, rerank';
+COMMENT ON COLUMN t_ai_provider.api_key IS 'API key';
+COMMENT ON COLUMN t_ai_provider.base_url IS 'Base URL for OpenAI-compatible APIs';
+COMMENT ON COLUMN t_ai_provider.model_name IS 'Model name';
+COMMENT ON COLUMN t_ai_provider.extra_config IS 'Extra config JSON (temperature, dimension, etc.)';
+COMMENT ON COLUMN t_ai_provider.is_active IS 'Whether this config is currently active';
+
+COMMENT ON COLUMN t_rag_chunk.embedding_provider_id IS 'Reference to t_ai_provider.provider_id used for embedding';

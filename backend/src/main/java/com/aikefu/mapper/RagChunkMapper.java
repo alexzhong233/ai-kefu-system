@@ -9,13 +9,15 @@ import java.util.Map;
 
 @Mapper
 public interface RagChunkMapper extends BaseMapper<RagChunk> {
-    
-    List<RagChunk> searchByVector(@Param("embedding") float[] embedding, @Param("topK") int topK);
-    
+
+    List<RagChunk> searchByVector(@Param("embedding") float[] embedding, @Param("topK") int topK,
+                                  @Param("embeddingProviderId") String embeddingProviderId);
+
     List<Map<String, Object>> searchByVectorWithThreshold(
-        @Param("embedding") float[] embedding, 
+        @Param("embedding") float[] embedding,
         @Param("topK") int topK,
-        @Param("threshold") double threshold
+        @Param("threshold") double threshold,
+        @Param("embeddingProviderId") String embeddingProviderId
     );
 
     /**

@@ -43,5 +43,13 @@ export default {
     getConversations: (userId) => apiClient.get('/chat/conversations', { params: { userId } }),
     getMessages: (conversationId) => apiClient.get(`/chat/conversations/${conversationId}/messages`),
     deleteConversation: (conversationId) => apiClient.delete(`/chat/conversations/${conversationId}`)
+  },
+  config: {
+    getProviders: () => apiClient.get('/config/providers'),
+    createProvider: (data) => apiClient.post('/config/providers', data),
+    updateProvider: (id, data) => apiClient.put(`/config/providers/${id}`, data),
+    deleteProvider: (id) => apiClient.delete(`/config/providers/${id}`),
+    activateProvider: (id) => apiClient.post(`/config/providers/${id}/activate`),
+    testProvider: (data) => apiClient.post('/config/test', data)
   }
 }

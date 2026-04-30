@@ -22,13 +22,15 @@ import reactor.core.publisher.Flux;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ChatService {
     
-    private final ChatModel chatModel;
+    private final DynamicModelProvider modelProvider;
+    private final AiProviderService aiProviderService;
     private final UserMapper userMapper;
     private final ConversationMapper conversationMapper;
     private final ConversationMessageMapper messageMapper;
@@ -95,7 +97,7 @@ public class ChatService {
 
         String assistantResponse;
         try {
-            ChatResponse chatResponse = chatModel.call(new Prompt(messages));
+            ChatResponse chatResponse = modelProvider.getChatModel().call(new Prompt(messages));
             assistantResponse = chatResponse.getResult().getOutput().getText();
         } catch (Exception e) {
             log.error("Error calling chat API", e);
@@ -179,7 +181,7 @@ public class ChatService {
                 .build()
         );
 
-        Flux<ServerSentEvent<String>> tokenFlux = chatModel.stream(new Prompt(messages))
+        Flux<ServerSentEvent<String>> tokenFlux = modelProvider.getChatModel().stream(new Prompt(messages))
             .flatMap(chatResponse -> {
                 String token = chatResponse.getResult().getOutput().getText();
                 if (token != null && !token.isEmpty()) {
@@ -298,7 +300,12 @@ public class ChatService {
         message.setConversationId(conversationId);
         message.setRole(role);
         message.setContent(content);
-        message.setMetadata(Map.of("model", "deepseek-v4-flash"));
+        String modelName = "unknown";
+        try {
+            AiProvider chatProvider = aiProviderService.getActiveByModelType("chat");
+            if (chatProvider != null) modelName = chatProvider.getModelName();
+        } catch (Exception ignored) {}
+        message.setMetadata(Map.of("model", modelName));
         messageMapper.insert(message);
         return message;
     }
@@ -419,7 +426,7 @@ public class ChatService {
 
             String prompt = String.format(SUMMARY_PROMPT, conversationText.toString());
 
-            ChatResponse response = chatModel.call(new Prompt(List.of(new UserMessage(prompt))));
+            ChatResponse response = modelProvider.getChatModel().call(new Prompt(List.of(new UserMessage(prompt))));
             String result = response.getResult().getOutput().getText();
 
             // 清理 markdown 代码块标记

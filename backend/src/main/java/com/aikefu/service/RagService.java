@@ -2,25 +2,26 @@ package com.aikefu.service;
 
 import com.aikefu.dto.DocumentUploadResponse;
 import com.aikefu.dto.QueryRequest;
+import com.aikefu.entity.AiProvider;
 import com.aikefu.entity.RagChunk;
 import com.aikefu.entity.RagDocument;
 import com.aikefu.mapper.RagChunkMapper;
 import com.aikefu.mapper.RagDocumentMapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.huaban.analysis.jieba.JiebaSegmenter;
 import com.huaban.analysis.jieba.SegToken;
 import com.knuddels.jtokkit.Encodings;
 import com.knuddels.jtokkit.api.Encoding;
 import com.knuddels.jtokkit.api.EncodingType;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.tika.exception.TikaException;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.embedding.EmbeddingResponse;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 import org.springframework.web.multipart.MultipartFile;
 import org.apache.tika.Tika;
-import org.springframework.web.client.RestTemplate;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -32,67 +33,110 @@ import java.util.stream.Collectors;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class RagService {
-    
+
     private final RagDocumentMapper documentMapper;
     private final RagChunkMapper chunkMapper;
-    private final EmbeddingModel embeddingModel;
+    private final DynamicModelProvider modelProvider;
+    private final AiProviderService aiProviderService;
+    private final RestTemplate restTemplate;
+
+    public RagService(RagDocumentMapper documentMapper, RagChunkMapper chunkMapper,
+                      DynamicModelProvider modelProvider, AiProviderService aiProviderService,
+                      RestTemplate restTemplate) {
+        this.documentMapper = documentMapper;
+        this.chunkMapper = chunkMapper;
+        this.modelProvider = modelProvider;
+        this.aiProviderService = aiProviderService;
+        this.restTemplate = restTemplate;
+    }
     
     private static final String UPLOAD_DIR = System.getProperty("user.dir") + "/uploads/";
     
     /** jtokkit 编码器（用于 token 计数，近似 cl100k_base） */
     private final Encoding tokenEncoder = Encodings.newDefaultEncodingRegistry().getEncoding(EncodingType.CL100K_BASE);
-    
+
     /** jieba 分词器（延迟初始化，词典加载较慢） */
     private volatile JiebaSegmenter jiebaSegmenter;
     
-    // ======================== 配置项 ========================
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.chunk-mode:semantic}")
-    private String chunkMode;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.chunk-size:512}")
-    private int chunkSize;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.chunk-overlap:64}")
-    private int chunkOverlap;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.min-chunk-size:50}")
-    private int minChunkSize;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.similarity-threshold:0.5}")
-    private float similarityThreshold;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.embedding-dimension:1024}")
-    private int embeddingDimension;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.semantic.similarity-threshold:0.5}")
-    private float semanticSimilarityThreshold;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.semantic.sentence-window:1}")
-    private int semanticSentenceWindow;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.parent-child.enabled:true}")
-    private boolean parentChildEnabled;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.parent-child.parent-max-heading-level:2}")
-    private int parentMaxHeadingLevel;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.rerank.candidate-multiplier:3}")
-    private int rerankCandidateMultiplier;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.rerank.keyword-weight:0.2}")
-    private float rerankKeywordWeight;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.rerank.cross-encoder.enabled:true}")
-    private boolean crossEncoderEnabled;
-    
-    @org.springframework.beans.factory.annotation.Value("${rag.rerank.cross-encoder.model:gte-rerank}")
-    private String crossEncoderModel;
-    
-    @org.springframework.beans.factory.annotation.Value("${spring.ai.dashscope.api-key}")
-    private String dashscopeApiKey;
+    // ======================== 配置项（从 active embedding provider 的 extra_config 读取） ========================
+
+    private AiProvider getActiveEmbeddingProvider() {
+        return aiProviderService.getActiveByModelType("embedding");
+    }
+
+    private AiProvider getActiveRerankProvider() {
+        return aiProviderService.getActiveByModelType("rerank");
+    }
+
+    private String getChunkMode() {
+        return aiProviderService.getExtraConfigValue(getActiveEmbeddingProvider(), "chunkMode", "semantic");
+    }
+
+    private int getChunkSize() {
+        return aiProviderService.getExtraConfigInt(getActiveEmbeddingProvider(), "chunkSize", 512);
+    }
+
+    private int getChunkOverlap() {
+        return aiProviderService.getExtraConfigInt(getActiveEmbeddingProvider(), "chunkOverlap", 64);
+    }
+
+    private int getMinChunkSize() {
+        return aiProviderService.getExtraConfigInt(getActiveEmbeddingProvider(), "minChunkSize", 50);
+    }
+
+    private float getSimilarityThreshold() {
+        return aiProviderService.getExtraConfigFloat(getActiveEmbeddingProvider(), "similarityThreshold", 0.5f);
+    }
+
+    private int getEmbeddingDimension() {
+        return aiProviderService.getExtraConfigInt(getActiveEmbeddingProvider(), "dimension", 1024);
+    }
+
+    private float getSemanticSimilarityThreshold() {
+        return aiProviderService.getExtraConfigFloat(getActiveEmbeddingProvider(), "semanticSimilarityThreshold", 0.5f);
+    }
+
+    private boolean isParentChildEnabled() {
+        return aiProviderService.getExtraConfigBoolean(getActiveEmbeddingProvider(), "parentChildEnabled", true);
+    }
+
+    private int getParentMaxHeadingLevel() {
+        return aiProviderService.getExtraConfigInt(getActiveEmbeddingProvider(), "parentMaxHeadingLevel", 2);
+    }
+
+    private int getRerankCandidateMultiplier() {
+        return aiProviderService.getExtraConfigInt(getActiveEmbeddingProvider(), "rerankCandidateMultiplier", 3);
+    }
+
+    private float getRerankKeywordWeight() {
+        return aiProviderService.getExtraConfigFloat(getActiveEmbeddingProvider(), "rerankKeywordWeight", 0.2f);
+    }
+
+    private boolean isCrossEncoderEnabled() {
+        return aiProviderService.getExtraConfigBoolean(getActiveEmbeddingProvider(), "rerankCrossEncoderEnabled", true);
+    }
+
+    private String getCrossEncoderModel() {
+        AiProvider rerankProvider = getActiveRerankProvider();
+        if (rerankProvider != null) return rerankProvider.getModelName();
+        return aiProviderService.getExtraConfigValue(getActiveEmbeddingProvider(), "rerankModel", "gte-rerank");
+    }
+
+    private String getRerankApiKey() {
+        AiProvider rerankProvider = getActiveRerankProvider();
+        if (rerankProvider != null) return rerankProvider.getApiKey();
+        AiProvider embeddingProvider = getActiveEmbeddingProvider();
+        return embeddingProvider != null ? embeddingProvider.getApiKey() : "";
+    }
+
+    private String getRerankBaseUrl() {
+        AiProvider rerankProvider = getActiveRerankProvider();
+        if (rerankProvider != null && rerankProvider.getBaseUrl() != null && !rerankProvider.getBaseUrl().isEmpty()) {
+            return rerankProvider.getBaseUrl();
+        }
+        return "https://dashscope.aliyuncs.com";
+    }
     
     // ======================== 内部类 ========================
     
@@ -141,7 +185,9 @@ public class RagService {
     
     /** 计算文本的 token 数量（使用 jtokkit，近似 cl100k_base 编码） */
     private int countTokens(String text) {
-        if (text == null || text.isEmpty()) return 0;
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
         return tokenEncoder.countTokens(text);
     }
     
@@ -149,15 +195,34 @@ public class RagService {
     
     private JiebaSegmenter getJiebaSegmenter() {
         if (jiebaSegmenter == null) {
-            synchronized (this) {
-                if (jiebaSegmenter == null) {
-                    log.info("初始化 jieba 分词器...");
-                    jiebaSegmenter = new JiebaSegmenter();
-                    log.info("jieba 分词器初始化完成");
-                }
-            }
+            log.info("初始化 jieba 分词器...");
+            jiebaSegmenter = new JiebaSegmenter();
+            log.info("jieba 分词器初始化完成");
         }
         return jiebaSegmenter;
+    }
+
+    // ======================== 分块辅助方法 ========================
+
+    /** 将当前 chunk 追加到结果列表，并设置 overlap 缓冲区 */
+    private void flushChunk(List<TextChunk> result, String chunkText, ChunkMeta meta, StringBuilder buffer, int overlapTokens) {
+        result.add(new TextChunk(chunkText.trim(), copyMeta(meta)));
+        String overlap = getOverlapTextByToken(chunkText, overlapTokens);
+        buffer.setLength(0);
+        buffer.append(overlap);
+    }
+
+    /** 尝试将小文本作为单个 chunk 返回，不满足条件时返回 null */
+    private List<TextChunk> tryReturnSingleChunk(String text, String fileName) {
+        if (text == null || text.isEmpty()) {
+            return new ArrayList<>();
+        }
+        if (countTokens(text) <= getChunkSize()) {
+            ChunkMeta meta = new ChunkMeta();
+            meta.documentTitle = extractDocumentTitle(fileName);
+            return new ArrayList<>(List.of(new TextChunk(text, meta)));
+        }
+        return null;
     }
     
     // ======================== 文档上传 ========================
@@ -194,23 +259,24 @@ public class RagService {
             
             // 分块：根据配置选择 fixed 或 semantic
             List<TextChunk> chunks;
-            if ("semantic".equals(chunkMode)) {
+            if ("semantic".equals(getChunkMode())) {
                 chunks = chunkTextSemantic(content, fileName);
             } else {
                 chunks = chunkTextFixed(content, fileName);
             }
             
             // 如果启用 Parent-Child，对 chunks 进行父子分层
-            if (parentChildEnabled) {
+            if (isParentChildEnabled()) {
                 chunks = applyParentChildStrategy(chunks, fileName);
             }
             
             // 存储所有 chunks
+            String embeddingProviderId = getActiveEmbeddingProvider() != null ? getActiveEmbeddingProvider().getProviderId() : null;
             int chunkCount = 0;
             for (int i = 0; i < chunks.size(); i++) {
                 TextChunk tc = chunks.get(i);
                 float[] embedding = generateEmbedding(tc.text);
-                
+
                 RagChunk chunk = new RagChunk();
                 chunk.setChunkId(tc.chunkId);
                 chunk.setDocumentId(documentId);
@@ -218,6 +284,7 @@ public class RagService {
                 chunk.setContent(tc.text);
                 chunk.setEmbedding(embedding);
                 chunk.setParentChunkId(tc.parentChunkId);
+                chunk.setEmbeddingProviderId(embeddingProviderId);
                 chunk.setMetadata(tc.meta.toMap(fileName, countTokens(tc.text)));
                 chunkMapper.insert(chunk);
                 chunkCount++;
@@ -227,8 +294,8 @@ public class RagService {
             document.setStatus("completed");
             documentMapper.updateById(document);
             
-            log.info("Document processed: id={}, chunks={}, mode={}, parent-child={}", 
-                     documentId, chunkCount, chunkMode, parentChildEnabled);
+            log.info("Document processed: id={}, chunks={}, mode={}, parent-child={}",
+                     documentId, chunkCount, getChunkMode(), isParentChildEnabled());
             
             return new DocumentUploadResponse(documentId, fileName, "completed", chunkCount, "Document uploaded and processed successfully");
             
@@ -254,22 +321,23 @@ public class RagService {
     
     public List<Map<String, Object>> queryRag(QueryRequest request) {
         int topK = request.getTopK() != null ? request.getTopK() : 5;
-        double threshold = request.getThreshold() != null ? request.getThreshold() : similarityThreshold;
-        
-        log.info("RAG Query: query={}, topK={}, threshold={}, crossEncoder={}", 
-                 request.getQuery(), topK, threshold, crossEncoderEnabled);
-        
+        double threshold = request.getThreshold() != null ? request.getThreshold() : getSimilarityThreshold();
+
+        log.info("RAG Query: query={}, topK={}, threshold={}, crossEncoder={}",
+                 request.getQuery(), topK, threshold, isCrossEncoderEnabled());
+
         float[] queryEmbedding = generateEmbedding(request.getQuery());
-        
+
         // 多召回候选，用于后续重排
-        int candidateK = topK * rerankCandidateMultiplier;
+        int candidateK = topK * getRerankCandidateMultiplier();
+        String embeddingProviderId = getActiveEmbeddingProvider() != null ? getActiveEmbeddingProvider().getProviderId() : null;
         List<Map<String, Object>> candidates = chunkMapper.searchByVectorWithThreshold(
-            queryEmbedding, candidateK, Math.max(threshold * 0.8, 0.3)
+            queryEmbedding, candidateK, Math.max(threshold * 0.8, 0.3), embeddingProviderId
         );
-        
+
         // 重排：优先使用 Cross-encoder，失败时回退到关键词+向量混合
         List<Map<String, Object>> reranked;
-        if (crossEncoderEnabled) {
+        if (isCrossEncoderEnabled()) {
             reranked = rerankByCrossEncoder(request.getQuery(), candidates);
             if (reranked == null) {
                 log.warn("Cross-encoder rerank failed, falling back to keyword+vector");
@@ -283,7 +351,7 @@ public class RagService {
         List<Map<String, Object>> finalResults = reranked.stream().limit(topK).collect(Collectors.toList());
         
         // Parent-Child 上下文扩展
-        if (parentChildEnabled) {
+        if (isParentChildEnabled()) {
             finalResults = expandWithParentContext(finalResults);
         }
         
@@ -324,7 +392,7 @@ public class RagService {
             
             // 构造 DashScope rerank 请求
             Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("model", crossEncoderModel);
+            requestBody.put("model", getCrossEncoderModel());
             
             Map<String, Object> input = new HashMap<>();
             input.put("query", query);
@@ -336,17 +404,16 @@ public class RagService {
             parameters.put("return_documents", false);
             requestBody.put("parameters", parameters);
             
-            RestTemplate restTemplate = new RestTemplate();
-            org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+                        org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
             headers.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
-            headers.set("Authorization", "Bearer " + dashscopeApiKey);
+            headers.set("Authorization", "Bearer " + getRerankApiKey());
             
             org.springframework.http.HttpEntity<Map<String, Object>> entity = 
                 new org.springframework.http.HttpEntity<>(requestBody, headers);
             
             @SuppressWarnings("unchecked")
             Map<String, Object> response = restTemplate.postForObject(
-                "https://dashscope.aliyuncs.com/api/v1/services/rerank",
+                getRerankBaseUrl() + "/api/v1/services/rerank",
                 entity,
                 Map.class
             );
@@ -416,7 +483,7 @@ public class RagService {
             
             double keywordScore = calculateKeywordScore(queryKeywords, content);
             
-            double finalScore = (1.0 - rerankKeywordWeight) * vectorScore + rerankKeywordWeight * keywordScore;
+            double finalScore = (1.0 - getRerankKeywordWeight()) * vectorScore + getRerankKeywordWeight() * keywordScore;
             candidate.put("finalScore", finalScore);
             candidate.put("keywordScore", keywordScore);
             candidate.put("rerankMethod", "keyword+vector");
@@ -540,86 +607,62 @@ public class RagService {
      * 替代之前的字符计数，保证中英文混排时 chunk 大小更均匀
      */
     private List<TextChunk> chunkTextFixed(String text, String fileName) {
-        List<TextChunk> result = new ArrayList<>();
-        
-        if (text == null || text.isEmpty()) {
-            return result;
-        }
-        
-        if (countTokens(text) <= chunkSize) {
-            ChunkMeta meta = new ChunkMeta();
-            meta.documentTitle = extractDocumentTitle(fileName);
-            result.add(new TextChunk(text, meta));
-            return result;
-        }
-        
+        List<TextChunk> singleResult = tryReturnSingleChunk(text, fileName);
+        if (singleResult != null) return singleResult;
+
         // Step 1: 按段落/标题拆分成语义单元
         List<Map.Entry<String, ChunkMeta>> segments = splitIntoSegmentsWithMeta(text, fileName);
-        
+
         // Step 2: 将语义单元合并为 chunk（基于 token 计数）
+        List<TextChunk> result = new ArrayList<>();
         StringBuilder currentChunk = new StringBuilder();
-        String overlapBuffer = "";
         ChunkMeta currentMeta = new ChunkMeta();
         currentMeta.documentTitle = extractDocumentTitle(fileName);
-        
+
         for (Map.Entry<String, ChunkMeta> segEntry : segments) {
             String segment = segEntry.getKey();
             ChunkMeta segMeta = segEntry.getValue();
-            
-            // 更新当前 chunk 的标题上下文
+
             if (segMeta.headingLevel > 0) {
                 currentMeta.heading = segMeta.heading;
                 currentMeta.headingLevel = segMeta.headingLevel;
             }
-            
+
             int segmentTokens = countTokens(segment);
             int currentTokens = countTokens(currentChunk.toString());
-            
-            if (segmentTokens > chunkSize) {
+
+            if (segmentTokens > getChunkSize()) {
                 // 超长段落需要进一步切分
                 if (currentChunk.length() > 0) {
-                    result.add(new TextChunk(currentChunk.toString().trim(), copyMeta(currentMeta)));
-                    overlapBuffer = getOverlapTextByToken(currentChunk.toString(), chunkOverlap);
-                    currentChunk = new StringBuilder(overlapBuffer);
+                    flushChunk(result, currentChunk.toString(), currentMeta, currentChunk, getChunkOverlap());
                 }
-                List<String> subChunks = splitLongSegment(segment);
-                for (String sub : subChunks) {
-                    int subTokens = countTokens(sub);
-                    int newTokens = countTokens(currentChunk.toString()) + subTokens;
-                    if (newTokens > chunkSize && countTokens(currentChunk.toString()) > countTokens(overlapBuffer)) {
-                        result.add(new TextChunk(currentChunk.toString().trim(), copyMeta(currentMeta)));
-                        overlapBuffer = getOverlapTextByToken(currentChunk.toString(), chunkOverlap);
-                        currentChunk = new StringBuilder(overlapBuffer);
+                for (String sub : splitLongSegment(segment)) {
+                    int newTokens = countTokens(currentChunk.toString()) + countTokens(sub);
+                    if (newTokens > getChunkSize() && countTokens(currentChunk.toString()) > 0) {
+                        flushChunk(result, currentChunk.toString(), currentMeta, currentChunk, getChunkOverlap());
                     }
                     currentChunk.append(sub).append("\n");
                 }
+            } else if (currentTokens + segmentTokens <= getChunkSize()) {
+                currentChunk.append(segment).append("\n");
             } else {
-                int newTokens = currentTokens + segmentTokens;
-                if (newTokens <= chunkSize) {
-                    currentChunk.append(segment).append("\n");
-                } else {
-                    if (currentChunk.length() > 0) {
-                        result.add(new TextChunk(currentChunk.toString().trim(), copyMeta(currentMeta)));
-                        overlapBuffer = getOverlapTextByToken(currentChunk.toString(), chunkOverlap);
-                        currentChunk = new StringBuilder(overlapBuffer);
-                    }
-                    currentChunk.append(segment).append("\n");
+                if (currentChunk.length() > 0) {
+                    flushChunk(result, currentChunk.toString(), currentMeta, currentChunk, getChunkOverlap());
                 }
+                currentChunk.append(segment).append("\n");
             }
         }
-        
+
         if (currentChunk.length() > 0) {
             String last = currentChunk.toString().trim();
-            if (countTokens(last) >= minChunkSize || result.isEmpty()) {
+            if (countTokens(last) >= getMinChunkSize() || result.isEmpty()) {
                 result.add(new TextChunk(last, copyMeta(currentMeta)));
             } else {
-                if (!result.isEmpty()) {
-                    TextChunk prev = result.get(result.size() - 1);
-                    result.set(result.size() - 1, new TextChunk(prev.text + "\n" + last, prev.meta));
-                }
+                TextChunk prev = result.get(result.size() - 1);
+                result.set(result.size() - 1, new TextChunk(prev.text + "\n" + last, prev.meta));
             }
         }
-        
+
         return result;
     }
     
@@ -637,19 +680,11 @@ public class RagService {
      * 6. 保证同一 chunk 内语义连贯
      */
     private List<TextChunk> chunkTextSemantic(String text, String fileName) {
+        List<TextChunk> singleResult = tryReturnSingleChunk(text, fileName);
+        if (singleResult != null) return singleResult;
+
         List<TextChunk> result = new ArrayList<>();
-        
-        if (text == null || text.isEmpty()) {
-            return result;
-        }
-        
-        if (countTokens(text) <= chunkSize) {
-            ChunkMeta meta = new ChunkMeta();
-            meta.documentTitle = extractDocumentTitle(fileName);
-            result.add(new TextChunk(text, meta));
-            return result;
-        }
-        
+
         // Step 1: 按标题拆分成大段
         List<Map.Entry<String, ChunkMeta>> headingSegments = splitByHeading(text, fileName);
         
@@ -658,7 +693,7 @@ public class RagService {
             String sectionText = headingEntry.getKey();
             ChunkMeta sectionMeta = headingEntry.getValue();
             
-            if (countTokens(sectionText) <= chunkSize) {
+            if (countTokens(sectionText) <= getChunkSize()) {
                 result.add(new TextChunk(sectionText, sectionMeta));
                 continue;
             }
@@ -690,7 +725,7 @@ public class RagService {
             // 根据相似度确定切分点：相似度低于阈值处切分
             List<Integer> splitPoints = new ArrayList<>();
             for (int i = 0; i < similarities.size(); i++) {
-                if (similarities.get(i) < semanticSimilarityThreshold) {
+                if (similarities.get(i) < getSemanticSimilarityThreshold()) {
                     splitPoints.add(i + 1);  // 在 i 和 i+1 之间切分
                 }
             }
@@ -700,7 +735,9 @@ public class RagService {
             ChunkMeta currentMeta = copyMeta(sectionMeta);
             
             for (int sp : splitPoints) {
-                if (sp <= start) continue;
+                if (sp <= start) {
+                    continue;
+                }
                 
                 StringBuilder chunkBuilder = new StringBuilder();
                 for (int i = start; i < sp; i++) {
@@ -709,10 +746,10 @@ public class RagService {
                 
                 String chunkText = chunkBuilder.toString().trim();
                 
-                if (countTokens(chunkText) > chunkSize) {
+                if (countTokens(chunkText) > getChunkSize()) {
                     // chunk 超过 token 上限，进一步切分
                     result.addAll(chunkTextFixed(chunkText, fileName));
-                } else if (countTokens(chunkText) >= minChunkSize) {
+                } else if (countTokens(chunkText) >= getMinChunkSize()) {
                     result.add(new TextChunk(chunkText, currentMeta));
                 }
                 
@@ -727,9 +764,9 @@ public class RagService {
                 }
                 String lastChunk = lastBuilder.toString().trim();
                 
-                if (countTokens(lastChunk) > chunkSize) {
+                if (countTokens(lastChunk) > getChunkSize()) {
                     result.addAll(chunkTextFixed(lastChunk, fileName));
-                } else if (result.isEmpty() || countTokens(lastChunk) >= minChunkSize) {
+                } else if (result.isEmpty() || countTokens(lastChunk) >= getMinChunkSize()) {
                     result.add(new TextChunk(lastChunk, currentMeta));
                 } else {
                     TextChunk prev = result.get(result.size() - 1);
@@ -743,39 +780,9 @@ public class RagService {
         return result;
     }
     
-    /**
-     * 按标题级别拆分文本（标题处必然切分）
-     */
+    /** 按标题级别拆分文本（标题处必然切分） */
     private List<Map.Entry<String, ChunkMeta>> splitByHeading(String text, String fileName) {
-        List<Map.Entry<String, ChunkMeta>> sections = new ArrayList<>();
-        String[] lines = text.split("\n");
-        StringBuilder currentSection = new StringBuilder();
-        ChunkMeta currentMeta = new ChunkMeta();
-        currentMeta.documentTitle = extractDocumentTitle(fileName);
-        
-        for (String line : lines) {
-            String trimmed = line.trim();
-            
-            if (trimmed.matches("^#{1,6}\\s+.+")) {
-                if (currentSection.length() > 0) {
-                    sections.add(Map.entry(currentSection.toString().trim(), copyMeta(currentMeta)));
-                    currentSection = new StringBuilder();
-                }
-                int level = 0;
-                while (level < trimmed.length() && trimmed.charAt(level) == '#') level++;
-                currentMeta.headingLevel = level;
-                currentMeta.heading = trimmed.replaceAll("^#{1,6}\\s+", "").trim();
-                currentSection.append(trimmed).append("\n");
-            } else {
-                currentSection.append(trimmed).append("\n");
-            }
-        }
-        
-        if (currentSection.length() > 0) {
-            sections.add(Map.entry(currentSection.toString().trim(), copyMeta(currentMeta)));
-        }
-        
-        return sections;
+        return parseToSegments(text, fileName, false);
     }
     
     /**
@@ -804,20 +811,20 @@ public class RagService {
             
             for (int i = 0; i < texts.size(); i += batchSize) {
                 List<String> batch = texts.subList(i, Math.min(i + batchSize, texts.size()));
-                EmbeddingResponse response = embeddingModel.embedForResponse(batch);
+                EmbeddingResponse response = modelProvider.getEmbeddingModel().embedForResponse(batch);
                 
                 if (response != null && response.getResults() != null) {
                     for (int j = 0; j < batch.size(); j++) {
                         if (j < response.getResults().size()) {
                             float[] embedding = response.getResults().get(j).getOutput();
-                            allEmbeddings.add(embedding != null ? embedding : new float[embeddingDimension]);
+                            allEmbeddings.add(embedding != null ? embedding : new float[getEmbeddingDimension()]);
                         } else {
-                            allEmbeddings.add(new float[embeddingDimension]);
+                            allEmbeddings.add(new float[getEmbeddingDimension()]);
                         }
                     }
                 } else {
                     for (int j = 0; j < batch.size(); j++) {
-                        allEmbeddings.add(new float[embeddingDimension]);
+                        allEmbeddings.add(new float[getEmbeddingDimension()]);
                     }
                 }
             }
@@ -844,7 +851,9 @@ public class RagService {
             normA += a[i] * a[i];
             normB += b[i] * b[i];
         }
-        if (normA == 0 || normB == 0) return 0.0;
+        if (normA == 0 || normB == 0) {
+            return 0.0;
+        }
         return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
     }
     
@@ -869,7 +878,7 @@ public class RagService {
             TextChunk chunk = chunks.get(i);
             int headingLevel = chunk.meta.headingLevel;
             
-            if (headingLevel > 0 && headingLevel <= parentMaxHeadingLevel) {
+            if (headingLevel > 0 && headingLevel <= getParentMaxHeadingLevel()) {
                 if (currentParentStart >= 0) {
                     parentRanges.add(new int[]{currentParentStart, i});
                 }
@@ -945,14 +954,14 @@ public class RagService {
     
     public RagDocument getDocumentById(String documentId) {
         return documentMapper.selectOne(
-            new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<RagDocument>()
+            new QueryWrapper<RagDocument>()
                 .eq("document_id", documentId)
         );
     }
     
     public List<RagChunk> getChunksByDocumentId(String documentId) {
         return chunkMapper.selectList(
-            new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<RagChunk>()
+            new QueryWrapper<RagChunk>()
                 .eq("document_id", documentId)
                 .orderByAsc("chunk_index")
         );
@@ -967,7 +976,7 @@ public class RagService {
             }
 
             int docResult = documentMapper.update(null,
-                    new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<RagDocument>()
+                    new UpdateWrapper<RagDocument>()
                             .eq("document_id", documentId)
                             .set("deleted", 1));
             if (docResult <= 0) {
@@ -976,7 +985,7 @@ public class RagService {
             }
             
             int chunkResult = chunkMapper.update(null,
-                new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<RagChunk>()
+                new UpdateWrapper<RagChunk>()
                     .eq("document_id", documentId)
                     .set("deleted", 1)
             );
@@ -1010,20 +1019,20 @@ public class RagService {
         Map<String, Object> stats = new HashMap<>();
         
         stats.put("totalDocuments", documentMapper.selectCount(
-            new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<RagDocument>()
+            new QueryWrapper<RagDocument>()
                 .eq("deleted", 0)
         ));
         stats.put("totalChunks", chunkMapper.selectCount(
-            new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<RagChunk>()
+            new QueryWrapper<RagChunk>()
                 .eq("deleted", 0)
         ));
         stats.put("completedDocuments", documentMapper.selectCount(
-            new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<RagDocument>()
+            new QueryWrapper<RagDocument>()
                 .eq("deleted", 0)
                 .eq("status", "completed")
         ));
         stats.put("failedDocuments", documentMapper.selectCount(
-            new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<RagDocument>()
+            new QueryWrapper<RagDocument>()
                 .eq("deleted", 0)
                 .eq("status", "failed")
         ));
@@ -1032,17 +1041,17 @@ public class RagService {
     
     private float[] generateEmbedding(String text) {
         try {
-            EmbeddingResponse embeddingResponse = embeddingModel.embedForResponse(List.of(text));
+            EmbeddingResponse embeddingResponse = modelProvider.getEmbeddingModel().embedForResponse(List.of(text));
             if (embeddingResponse != null && !embeddingResponse.getResults().isEmpty()) {
                 float[] embedding = embeddingResponse.getResult().getOutput();
                 if (embedding != null && embedding.length > 0) {
                     return embedding;
                 }
             }
-            return new float[embeddingDimension];
+            return new float[getEmbeddingDimension()];
         } catch (Exception e) {
             log.error("Error generating embedding: {}", e.getMessage(), e);
-            return new float[embeddingDimension];
+            return new float[getEmbeddingDimension()];
         }
     }
     
@@ -1100,15 +1109,23 @@ public class RagService {
     }
     
     private String extractDocumentTitle(String fileName) {
-        if (fileName == null) return "";
+        if (fileName == null) {
+            return "";
+        }
         int dotIdx = fileName.lastIndexOf('.');
         return dotIdx > 0 ? fileName.substring(0, dotIdx) : fileName;
     }
 
-    /**
-     * 按段落和 Markdown 标题拆分为语义单元，同时追踪标题信息
-     */
+    /** 按段落和 Markdown 标题拆分为语义单元，同时追踪标题信息 */
     private List<Map.Entry<String, ChunkMeta>> splitIntoSegmentsWithMeta(String text, String fileName) {
+        return parseToSegments(text, fileName, true);
+    }
+
+    /**
+     * 统一的文本段落解析方法
+     * @param splitOnBlank true=空行也切分（用于固定分块），false=仅标题处切分（用于语义分块）
+     */
+    private List<Map.Entry<String, ChunkMeta>> parseToSegments(String text, String fileName, boolean splitOnBlank) {
         List<Map.Entry<String, ChunkMeta>> segments = new ArrayList<>();
         String[] lines = text.split("\n");
         StringBuilder currentSegment = new StringBuilder();
@@ -1117,18 +1134,20 @@ public class RagService {
 
         for (String line : lines) {
             String trimmed = line.trim();
-            
+
             if (trimmed.matches("^#{1,6}\\s+.+")) {
                 if (currentSegment.length() > 0) {
                     segments.add(Map.entry(currentSegment.toString().trim(), copyMeta(currentMeta)));
                     currentSegment = new StringBuilder();
                 }
                 int level = 0;
-                while (level < trimmed.length() && trimmed.charAt(level) == '#') level++;
+                while (level < trimmed.length() && trimmed.charAt(level) == '#') {
+                    level++;
+                }
                 currentMeta.headingLevel = level;
                 currentMeta.heading = trimmed.replaceAll("^#{1,6}\\s+", "").trim();
                 currentSegment.append(trimmed).append(" ");
-            } else if (trimmed.isEmpty()) {
+            } else if (splitOnBlank && trimmed.isEmpty()) {
                 if (currentSegment.length() > 0) {
                     segments.add(Map.entry(currentSegment.toString().trim(), copyMeta(currentMeta)));
                     currentSegment = new StringBuilder();
@@ -1157,14 +1176,14 @@ public class RagService {
             int currentTokens = countTokens(current.toString());
             int sentenceTokens = countTokens(sentence);
             
-            if (currentTokens + sentenceTokens <= chunkSize) {
+            if (currentTokens + sentenceTokens <= getChunkSize()) {
                 current.append(sentence);
             } else {
                 if (current.length() > 0) {
                     result.add(current.toString().trim());
                     current = new StringBuilder();
                 }
-                if (sentenceTokens > chunkSize) {
+                if (sentenceTokens > getChunkSize()) {
                     // 超长句子按 token 切分
                     result.addAll(splitByTokens(sentence));
                 } else {
@@ -1191,21 +1210,22 @@ public class RagService {
         
         for (String part : parts) {
             int partTokens = countTokens(part);
-            if (currentTokenCount + partTokens <= chunkSize) {
+            if (currentTokenCount + partTokens <= getChunkSize()) {
                 current.append(part);
                 currentTokenCount += partTokens;
             } else {
                 if (current.length() > 0) {
                     result.add(current.toString().trim());
-                    String overlap = getOverlapTextByToken(current.toString(), chunkOverlap);
-                    current = new StringBuilder(overlap);
+                    String overlap = getOverlapTextByToken(current.toString(), getChunkOverlap());
+                    current.setLength(0);
+                    current.append(overlap);
                     currentTokenCount = countTokens(overlap);
                 }
-                if (partTokens > chunkSize) {
+                if (partTokens > getChunkSize()) {
                     // 极端情况：单个片段超长，按字符硬切
-                    int step = chunkSize * 2;
+                    int step = getChunkSize() * 2;
                     for (int i = 0; i < part.length(); i += step) {
-                        int end = Math.min(i + chunkSize * 3, part.length());
+                        int end = Math.min(i + getChunkSize() * 3, part.length());
                         String sub = part.substring(i, end);
                         if (end < part.length()) {
                             int lastComma = findLastPunctuation(sub);
